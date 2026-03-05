@@ -12,7 +12,7 @@ class CrewaiCoffeeShop():
 
     llm_local_ollama = LLM(
         api_key="ollama",
-        model="llama3.1:8b",
+        model="llama3.2:1b",
         base_url="http://localhost:11434/v1"
     )
 
