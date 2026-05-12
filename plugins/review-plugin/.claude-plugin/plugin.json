@@ -1,0 +1,9 @@
+{
+  "name": "review-plugin",
+  "version": "1.0.0",
+  "description": "Automated quality review tool for Claude Code skills and plugins with scoring, pass/fail determination, and improvement guidance",
+  "author": {
+    "name": "poulin"
+  },
+  "keywords": ["review", "quality", "validation", "scoring", "plugins", "skills"]
+}
