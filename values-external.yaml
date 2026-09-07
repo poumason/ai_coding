@@ -1,0 +1,221 @@
+# =============================================================================
+# Langfuse Helm values — 全外接版本
+#   - PostgreSQL:  Bitnami postgresql-ha (pgpool)
+#   - Redis:       Bitnami redis (sentinel mode)
+#   - ClickHouse:  外部自管 (單機或叢集)
+#   - S3:          MinIO
+#
+# 使用方式：
+#   helm install langfuse . -n <namespace> -f values-external.yaml
+#
+# 部署前請先建立以下 Secret（Langfuse 從中讀取密碼 / 金鑰）：
+# ---
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: langfuse-external-secrets
+#   namespace: <namespace>
+# type: Opaque
+# stringData:
+#   postgres-password:   "<PG app user 密碼>"
+#   redis-password:      "<Redis default 使用者密碼>"
+#   sentinel-password:   "<Sentinel 密碼（若 sentinel 未啟用 auth 可省略）>"
+#   clickhouse-password: "<ClickHouse default 使用者密碼>"
+#   minio-access-key:    "<MinIO Access Key>"
+#   minio-secret-key:    "<MinIO Secret Key>"
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Langfuse 核心設定
+# -----------------------------------------------------------------------------
+langfuse:
+  logging:
+    level: info
+    format: json
+
+  # salt / encryptionKey / nextauth.secret 留空，首次安裝會自動產生並存進
+  # <release>-app Secret；若要固定值請自行填 value 或改用 secretKeyRef。
+  salt:
+    value: ""
+  encryptionKey:
+    value: ""
+
+  nextauth:
+    url: https://langfuse.example.com   # 對外可解析的正式 URL
+    secret:
+      value: ""
+
+  features:
+    telemetryEnabled: true
+    signUpDisabled: false
+    experimentalFeaturesEnabled: false
+
+  nodeEnv: production
+
+  # web / worker 副本數
+  replicas: 2
+
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    hosts:
+      - host: langfuse.example.com
+        paths:
+          - path: /
+            pathType: ImplementationSpecific
+    tls:
+      enabled: true
+      secretName: langfuse-tls
+
+  web:
+    replicas: 2
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        memory: 2Gi
+
+  worker:
+    replicas: 2
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        memory: 2Gi
+
+# -----------------------------------------------------------------------------
+# 1. PostgreSQL HA（Bitnami postgresql-ha / pgpool）
+#    需要事先建立 langfuse database 與 langfuse user，並 GRANT 所有權限。
+# -----------------------------------------------------------------------------
+postgresql:
+  deploy: false
+
+  # pgpool 的 Service DNS。若 chart release name = langfuse-pg、namespace = data：
+  #   <release>-postgresql-ha-pgpool.<ns>.svc.cluster.local
+  host: langfuse-pg-postgresql-ha-pgpool.data.svc.cluster.local
+  port: 5432
+
+  # Prisma migration 若被 pgpool 的 prepared statement 快取卡住，把 directUrl
+  # 指到 primary Service（bypass pgpool），例：
+  # directUrl: "postgresql://langfuse:<pw>@langfuse-pg-postgresql-ha-postgresql:5432/langfuse"
+  directUrl: ""
+
+  auth:
+    username: langfuse
+    database: langfuse
+    existingSecret: langfuse-external-secrets
+    secretKeys:
+      userPasswordKey: postgres-password
+
+  migration:
+    autoMigrate: true
+
+# -----------------------------------------------------------------------------
+# 2. Redis Sentinel（Bitnami redis with sentinel）
+#    ⚠️ Bitnami redis 預設 maxmemory-policy 為 allkeys-lru，
+#       Langfuse 需要 noeviction，請在該 chart 的 values.yaml 內設定：
+#         master.configuration: |
+#           maxmemory-policy noeviction
+#         replica.configuration: |
+#           maxmemory-policy noeviction
+# -----------------------------------------------------------------------------
+redis:
+  deploy: false
+
+  sentinel:
+    enabled: true
+    masterName: mymaster
+    # ⚠️ 逗號分隔字串（不是 YAML array！）
+    nodes: "langfuse-redis-node-0.langfuse-redis-headless.data.svc.cluster.local:26379,langfuse-redis-node-1.langfuse-redis-headless.data.svc.cluster.local:26379,langfuse-redis-node-2.langfuse-redis-headless.data.svc.cluster.local:26379"
+
+    # 若 Sentinel 也啟用了 auth（sentinel-auth-pass），才需要以下兩行：
+    existingSecret: langfuse-external-secrets
+    existingSecretPasswordKey: sentinel-password
+    # username: ""
+
+  auth:
+    username: default
+    existingSecret: langfuse-external-secrets
+    existingSecretPasswordKey: redis-password
+    database: 0
+
+  tls:
+    enabled: false
+    # caPath: /certs/ca.crt
+    # certPath: /certs/tls.crt
+    # keyPath: /certs/tls.key
+
+# -----------------------------------------------------------------------------
+# 3. ClickHouse（外接）
+#    外部 CH 需事先建立 database（default 或自訂），並確保 user 有 CREATE/ALTER
+#    權限（首次啟動 Langfuse 會跑 schema migrations 建 20+ 張表 / MV）。
+# -----------------------------------------------------------------------------
+clickhouse:
+  deploy: false
+  crdCheck: false               # 外接時關閉，避免驗證 operator CRD
+
+  host: clickhouse.data.svc.cluster.local
+  httpPort: 8123
+  nativePort: 9000
+  database: default
+
+  cluster:
+    enabled: false              # 外接非叢集模式必須為 false（否則會下 ON CLUSTER DDL）
+
+  auth:
+    username: default
+    existingSecret: langfuse-external-secrets
+    existingSecretKey: clickhouse-password
+
+  migration:
+    autoMigrate: true
+    ssl: false                  # 若使用 TLS (9440) 改成 true 並調整 nativePort
+
+# -----------------------------------------------------------------------------
+# 4. MinIO（S3 相容）
+#    ⚠️ 必須 forcePathStyle: true；bucket 需事先手動建立，chart 不會替外部
+#       S3 建立 bucket。
+# -----------------------------------------------------------------------------
+s3:
+  deploy: false
+  storageProvider: s3
+
+  # 頂層預設；每種 upload 未設就 fallback 到這裡
+  endpoint: "http://minio.data.svc.cluster.local:9000"
+  region: "us-east-1"           # MinIO 隨意給非空值即可
+  forcePathStyle: true          # 必要
+  bucket: langfuse              # 若三種 upload 共用同一個 bucket 保留即可
+
+  accessKeyId:
+    secretKeyRef:
+      name: langfuse-external-secrets
+      key: minio-access-key
+  secretAccessKey:
+    secretKeyRef:
+      name: langfuse-external-secrets
+      key: minio-secret-key
+
+  concurrency:
+    reads: 50
+    writes: 50
+
+  # ---- 建議正式環境把三種 upload 拆到不同 bucket ----
+  eventUpload:
+    bucket: langfuse-events
+    # prefix: "events/"
+
+  batchExport:
+    enabled: true
+    bucket: langfuse-exports
+    # prefix: "exports/"
+
+  mediaUpload:
+    enabled: true
+    bucket: langfuse-media
+    # prefix: "media/"
+    maxContentLength: 1000000000    # 1 GB
+    downloadUrlExpirySeconds: 3600  # 1 小時

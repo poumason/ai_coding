@@ -1,0 +1,195 @@
+# =============================================================================
+# Langfuse Helm values —「方案 A」允許 CRD 的環境
+#   使用 Langfuse chart 內建的 ClickHouse operator 部署（ClickHouseCluster + KeeperCluster CR）
+#
+# 其他 store 仍走外接：
+#   - PostgreSQL:  Bitnami postgresql-ha (pgpool)
+#   - Redis:       Bitnami redis (sentinel mode)
+#   - S3:          MinIO
+#
+# 前置條件（安裝前完成）：
+#   1. 安裝 cert-manager
+#        helm repo add jetstack https://charts.jetstack.io
+#        helm install cert-manager jetstack/cert-manager -n cert-manager \
+#          --create-namespace --set crds.enabled=true
+#
+#   2. 安裝 ClickHouse 官方 operator（會建立 clickhouse.com/v1alpha1 CRDs）
+#        helm repo add clickhouse https://docs.altinity.com/clickhouse-operator/
+#        helm install clickhouse-operator clickhouse/altinity-clickhouse-operator \
+#          -n clickhouse-operator --create-namespace
+#      # 或參考 https://github.com/ClickHouse/clickhouse-kubernetes-operator 的安裝指令
+#
+#   3. 建立密碼 Secret：
+#        kubectl create secret generic langfuse-external-secrets -n <namespace> \
+#          --from-literal=postgres-password='...' \
+#          --from-literal=redis-password='...' \
+#          --from-literal=sentinel-password='...' \
+#          --from-literal=minio-access-key='...' \
+#          --from-literal=minio-secret-key='...'
+#      # ClickHouse 密碼由 chart 自動產生並存進 <release>-clickhouse-auth
+#
+#   4. helm install langfuse . -n <namespace> -f values-embedded-clickhouse.yaml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Langfuse 核心
+# -----------------------------------------------------------------------------
+langfuse:
+  logging:
+    level: info
+    format: json
+
+  salt:
+    value: ""
+  encryptionKey:
+    value: ""
+
+  nextauth:
+    url: https://langfuse.example.com
+    secret:
+      value: ""
+
+  features:
+    telemetryEnabled: true
+    signUpDisabled: false
+
+  nodeEnv: production
+  replicas: 2
+
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    hosts:
+      - host: langfuse.example.com
+        paths:
+          - path: /
+            pathType: ImplementationSpecific
+    tls:
+      enabled: true
+      secretName: langfuse-tls
+
+  web:
+    replicas: 2
+    resources:
+      requests: { cpu: 500m, memory: 1Gi }
+      limits:   { memory: 2Gi }
+
+  worker:
+    replicas: 2
+    resources:
+      requests: { cpu: 500m, memory: 1Gi }
+      limits:   { memory: 2Gi }
+
+# -----------------------------------------------------------------------------
+# 1. PostgreSQL HA — 外接 Bitnami postgresql-ha
+# -----------------------------------------------------------------------------
+postgresql:
+  deploy: false
+  host: langfuse-pg-postgresql-ha-pgpool.data.svc.cluster.local
+  port: 5432
+  auth:
+    username: langfuse
+    database: langfuse
+    existingSecret: langfuse-external-secrets
+    secretKeys:
+      userPasswordKey: postgres-password
+  migration:
+    autoMigrate: true
+
+# -----------------------------------------------------------------------------
+# 2. Redis Sentinel — 外接 Bitnami redis
+# -----------------------------------------------------------------------------
+redis:
+  deploy: false
+  sentinel:
+    enabled: true
+    masterName: mymaster
+    nodes: "langfuse-redis-node-0.langfuse-redis-headless.data.svc.cluster.local:26379,langfuse-redis-node-1.langfuse-redis-headless.data.svc.cluster.local:26379,langfuse-redis-node-2.langfuse-redis-headless.data.svc.cluster.local:26379"
+    existingSecret: langfuse-external-secrets
+    existingSecretPasswordKey: sentinel-password
+  auth:
+    username: default
+    existingSecret: langfuse-external-secrets
+    existingSecretPasswordKey: redis-password
+    database: 0
+
+# -----------------------------------------------------------------------------
+# 3. ClickHouse — 使用 Langfuse chart 內建的 operator 部署（需要 CRD）
+# -----------------------------------------------------------------------------
+clickhouse:
+  deploy: true
+  crdCheck: true                # render 時檢查 CRD 存在
+
+  database: default
+
+  # 密碼未填 → chart 自動產生並存進 <release>-clickhouse-auth Secret
+  auth:
+    username: default           # 內建模式僅支援 default（validations.yaml 強制）
+    password: ""
+
+  cluster:
+    enabled: true               # Langfuse 會使用 ON CLUSTER DDL
+    replicas: 2                 # 2 replicas + 1 shard = HA
+    image:
+      repository: clickhouse/clickhouse-server
+      tag: "26.4"
+    storage:
+      size: 100Gi
+      className: ""             # 空 = 預設 StorageClass
+      accessModes:
+        - ReadWriteOnce
+    resources:
+      requests: { cpu: "1", memory: 2Gi }
+      limits:   { memory: 4Gi }
+
+  keeper:
+    enabled: true               # 有 cluster 就一定要開 Keeper
+    replicas: 3                 # 必須為奇數（1/3/5），正式環境用 3
+    image:
+      repository: clickhouse/clickhouse-keeper
+      tag: "26.4"
+    storage:
+      size: 20Gi
+      accessModes:
+        - ReadWriteOnce
+    resources:
+      requests: { cpu: 250m, memory: 256Mi }
+      limits:   { memory: 1Gi }
+
+  migration:
+    autoMigrate: true
+    ssl: false
+
+# -----------------------------------------------------------------------------
+# 4. MinIO（S3 相容）
+# -----------------------------------------------------------------------------
+s3:
+  deploy: false
+  storageProvider: s3
+
+  endpoint: "http://minio.data.svc.cluster.local:9000"
+  region: "us-east-1"
+  forcePathStyle: true
+  bucket: langfuse
+
+  accessKeyId:
+    secretKeyRef:
+      name: langfuse-external-secrets
+      key: minio-access-key
+  secretAccessKey:
+    secretKeyRef:
+      name: langfuse-external-secrets
+      key: minio-secret-key
+
+  eventUpload:
+    bucket: langfuse-events
+  batchExport:
+    enabled: true
+    bucket: langfuse-exports
+  mediaUpload:
+    enabled: true
+    bucket: langfuse-media
+    maxContentLength: 1000000000
+    downloadUrlExpirySeconds: 3600

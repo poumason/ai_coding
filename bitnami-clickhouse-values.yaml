@@ -1,0 +1,77 @@
+# =============================================================================
+# Bitnami ClickHouse chart values —（搭配 values-with-bitnami-clickhouse.yaml 使用）
+#
+# 這份是給 Bitnami CH chart 用的 values，不是給 Langfuse chart 用的。
+#
+# 部署命令：
+#   helm install clickhouse oci://registry-1.docker.io/bitnamicharts/clickhouse \
+#     -n data --create-namespace \
+#     -f bitnami-clickhouse-values.yaml
+#
+# ⚠️ Bitnami 已將多數 chart 轉為 legacy，正式環境建議：
+#   1. Pin chart version（用 --version <x.y.z> 鎖住）
+#   2. Pin image tag（下方 image.tag 已鎖 25.x）
+#   3. 未來考慮遷移到官方 clickhouse-server + StatefulSet
+# =============================================================================
+
+## Bitnami ClickHouse 主要參數
+## Full chart values ref: https://github.com/bitnami/charts/tree/main/bitnami/clickhouse
+
+# --- Image (pin 版本，Bitnami legacy 不再自動更新) ---
+image:
+  registry: docker.io
+  repository: bitnami/clickhouse
+  tag: 25.3.6-debian-12-r0     # 依 Langfuse 官方建議的 CH 版本挑選（>=24.x）
+  pullPolicy: IfNotPresent
+
+# --- 叢集架構：1 shard + 2 replica ---
+shards: 1
+replicaCount: 2
+
+# --- 認證：Langfuse 使用 default 使用者 ---
+auth:
+  username: default
+  # 從你已建立的 Secret 讀取密碼
+  existingSecret: langfuse-external-secrets
+  existingSecretKey: clickhouse-password
+
+# --- Persistence ---
+persistence:
+  enabled: true
+  size: 100Gi
+  storageClass: ""             # 空 = 使用預設 StorageClass
+  accessModes:
+    - ReadWriteOnce
+
+# --- Resources ---
+resources:
+  requests:
+    cpu: "1"
+    memory: "2Gi"
+  limits:
+    memory: "4Gi"
+
+# --- 內建 ClickHouse Keeper（取代 ZooKeeper） ---
+keeper:
+  enabled: true                # ⭐ 開啟 Keeper 才是真正的 cluster
+zookeeper:
+  enabled: false               # 用 Keeper 就不用 ZooKeeper
+
+# --- Service（Langfuse 從 headless service DNS 連進來） ---
+service:
+  type: ClusterIP
+  ports:
+    http: 8123
+    tcp: 9000
+
+# --- 增加 Langfuse 需要的 cluster 設定（macros） ---
+# Bitnami chart 預設會產生一個 cluster name = "default"，Langfuse chart 也預設用
+# CLICKHOUSE_CLUSTER_NAME=default，所以不用改；若要客製，在 defaultUser / macros
+# 這邊調整。
+
+# --- 副本間反親和性（避免同 node） ---
+podAntiAffinityPreset: soft
+
+# --- Metrics 開啟（可選） ---
+metrics:
+  enabled: false
