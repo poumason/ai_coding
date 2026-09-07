@@ -84,6 +84,13 @@ postgresql:
   deploy: false
   host: langfuse-pg-postgresql-ha-pgpool.data.svc.cluster.local
   port: 5432
+
+  # pgpool 的 prepared statement 快取偶爾會卡住 Prisma migration。若 migration
+  # 卡住或報 "prepared statement already exists" 之類的錯誤，把 directUrl 指到
+  # primary Service（bypass pgpool）即可：
+  # directUrl: "postgresql://langfuse:<pw>@langfuse-pg-postgresql-ha-postgresql:5432/langfuse"
+  directUrl: ""
+
   auth:
     username: langfuse
     database: langfuse
@@ -110,6 +117,12 @@ redis:
     existingSecretPasswordKey: redis-password
     database: 0
 
+  tls:
+    enabled: false
+    # caPath: /certs/ca.crt
+    # certPath: /certs/tls.crt
+    # keyPath: /certs/tls.key
+
 # -----------------------------------------------------------------------------
 # 3. ClickHouse — 外接 Bitnami ClickHouse
 #
@@ -121,7 +134,8 @@ redis:
 # -----------------------------------------------------------------------------
 clickhouse:
   deploy: false
-  crdCheck: false               # 外接必須關閉 CRD 檢查
+  # crdCheck 不用特別設：這個檢查只在 clickhouse.deploy=true 時才會跑
+  # （見 templates/validations.yaml），deploy=false 這裡已經自動跳過。
 
   # release name = clickhouse、namespace = data 時的 headless service DNS
   host: clickhouse.data.svc.cluster.local
@@ -146,6 +160,9 @@ clickhouse:
 
 # -----------------------------------------------------------------------------
 # 4. MinIO（S3 相容）
+#    ⚠️ 必須 forcePathStyle: true；下面三個 bucket（langfuse-events / -exports /
+#       -media）chart 不會替外部 S3 建立，要先手動在 MinIO 建好，否則上傳會直接
+#       噴 NoSuchBucket。
 # -----------------------------------------------------------------------------
 s3:
   deploy: false

@@ -18,10 +18,17 @@
 ## Full chart values ref: https://github.com/bitnami/charts/tree/main/bitnami/clickhouse
 
 # --- Image (pin 版本，Bitnami legacy 不再自動更新) ---
+# ⚠️ 版本已對齊這個 chart 內建方案的建議版本（見 values-embedded-clickhouse.yaml /
+#    values.yaml 的 clickhouse.cluster.image.tag = "26.4"）。
+#    但這個 tag 字串（26.4-debian-12-r0）尚未在本次 session 中即時查證是否為
+#    Bitnami registry 上實際存在的 tag（工具當下連不上網路）。部署前請先執行：
+#      docker manifest inspect bitnami/clickhouse:26.4-debian-12-r0
+#    或直接查 https://hub.docker.com/r/bitnami/clickhouse/tags 確認實際可用版本，
+#    再視需要調整成最接近的既有 tag。
 image:
   registry: docker.io
   repository: bitnami/clickhouse
-  tag: 25.3.6-debian-12-r0     # 依 Langfuse 官方建議的 CH 版本挑選（>=24.x）
+  tag: 26.4-debian-12-r0       # 對齊 langfuse chart 建議的 CH 26.4（請部署前查證 tag 是否存在）
   pullPolicy: IfNotPresent
 
 # --- 叢集架構：1 shard + 2 replica ---
@@ -70,7 +77,9 @@ service:
 # 這邊調整。
 
 # --- 副本間反親和性（避免同 node） ---
-podAntiAffinityPreset: soft
+# 用 hard：soft 只是「盡量」分散，node 數不夠或排程器忙時兩個 replica 仍可能被
+# 排到同一台 node，一旦該 node 掛掉就等於整個 HA 失效。要的是保證分散，所以用 hard。
+podAntiAffinityPreset: hard
 
 # --- Metrics 開啟（可選） ---
 metrics:
