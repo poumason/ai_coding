@@ -73,23 +73,41 @@ langfuse:
 # -----------------------------------------------------------------------------
 # 1. PostgreSQL HA
 # -----------------------------------------------------------------------------
+# 實際部署狀態（見 bitnami-postgresql-ha-values.yaml）：
+#   helm upgrade postgresql-ha oci://registry-1.docker.io/bitnamicharts/postgresql-ha \
+#     --version 16.3.2 -n dev -f bitnami-postgresql-ha-values.yaml
+#   → release=postgresql-ha, namespace=dev（非本輪部署，沿用既有 release，
+#     這次只是幫它補上 Langfuse 專用的 role/database）
+#
+#   這個 release 原本是純 chart 預設值裝的，只有內建的 postgres 超級使用者，
+#   沒有 Langfuse 專用帳號。已經手動建立：
+#     CREATE ROLE langfuse WITH LOGIN PASSWORD '...';
+#     CREATE DATABASE langfuse OWNER langfuse;
+#   密碼存進 Secret/langfuse-postgresql-app 的 password key。
+#
+#   ⚠️ 只在資料庫端建好 role 還不夠：pgpool（Langfuse 實際連的那個 service）
+#   自己維護一份獨立的 pool_passwd 密碼檔，只在 container 啟動時寫入
+#   pgpool.postgresUsername（預設 postgres）這一個使用者。新建的 langfuse
+#   role 要透過 pgpool.customUsersSecret 讓 chart 寫進 pool_passwd，不然會
+#   `SCRAM authentication failed: pool_passwd file does not contain an
+#   entry for "langfuse"`——細節見 bitnami-postgresql-ha-values.yaml。
 postgresql:
   deploy: false
-  host: langfuse-pg-postgresql-ha-pgpool.data.svc.cluster.local
+  host: postgresql-ha-pgpool.dev.svc.cluster.local
   port: 5432
 
   # pgpool 的 prepared statement 快取偶爾會卡住 Prisma migration。若 migration
   # 卡住或報 "prepared statement already exists" 之類的錯誤，把 directUrl 指到
   # primary Service（bypass pgpool）即可：
-  # directUrl: "postgresql://langfuse:<pw>@langfuse-pg-postgresql-ha-postgresql:5432/langfuse"
+  # directUrl: "postgresql://langfuse:<pw>@postgresql-ha-postgresql.dev.svc.cluster.local:5432/langfuse"
   directUrl: ""
 
   auth:
     username: langfuse
     database: langfuse
-    existingSecret: langfuse-external-secrets
+    existingSecret: langfuse-postgresql-app
     secretKeys:
-      userPasswordKey: postgres-password
+      userPasswordKey: password
   migration:
     autoMigrate: true
 

@@ -1,0 +1,66 @@
+# =============================================================================
+# Bitnami postgresql-ha chart values —（搭配 values-with-bitnami-clickhouse.yaml 使用）
+#
+# 這份是給 Bitnami postgresql-ha chart 用的 values，不是給 Langfuse chart 用的。
+#
+# 這個 release（postgresql-ha, namespace dev）在這次修正之前是完全用 chart
+# 預設值裝的（`helm get values` 回傳 null，沒有帶過任何 values），所以原本
+# 只有 chart 內建的 postgres 超級使用者跟 repmgr 內部使用者，沒有 Langfuse
+# 專用的 role/database。這份 values 只補這一件事，其他維持 chart 預設。
+#
+# 前置條件（已經做過，記錄在這裡供之後重建/比對）：
+#   1. 用 postgres 超級使用者連進去建立 langfuse role + database：
+#        CREATE ROLE langfuse WITH LOGIN PASSWORD '<...>';
+#        CREATE DATABASE langfuse OWNER langfuse;
+#        GRANT ALL PRIVILEGES ON DATABASE langfuse TO langfuse;
+#      密碼存進 Secret/langfuse-postgresql-app 的 password key。
+#
+#   2. 建立 Secret/langfuse-postgresql-pgpool-users（usernames/passwords 兩個
+#      key，值跟上面同一組密碼）——見下面 pgpool.customUsersSecret 的說明。
+#
+# 部署（升級既有 release）命令：
+#   helm upgrade postgresql-ha oci://registry-1.docker.io/bitnamicharts/postgresql-ha \
+#     --version 16.3.2 -n dev \
+#     -f bitnami-postgresql-ha-values.yaml
+# =============================================================================
+
+# --- Image：這個既有 release 原本用 chart 預設值裝的時候，剛好是在
+#     bitnami/pgpool、bitnami/postgresql-repmgr 這兩個 image 還沒被拿掉
+#     免費 tag 之前，所以舊的 pod 到現在還跑得動（node 上已經有 cache，
+#     imagePullPolicy: IfNotPresent 不會重新 pull）。但這次 upgrade 一
+#     套用新的 pod template，Kubernetes 幫新 pod 重新 pull 同一個 tag
+#     就直接 ErrImagePull——跟 clickhouse/minio 那次一樣，Docker Hub API
+#     查 bitnami/pgpool、bitnami/postgresql-repmgr 都是 count:0，也是
+#     完全被收進付費牆了。改指到 bitnamilegacy，用 digest 釘住。
+postgresql:
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/postgresql-repmgr
+    tag: 17.6.0-debian-12-r2
+    digest: "sha256:f12387ec882ba42383bbeccfe56d1e9b7671bfbb10795426de4acf2ae800f314"
+    pullPolicy: IfNotPresent
+
+# --- Pgpool：image override 跟下面的 customUsersSecret 合併成同一個 pgpool:
+#     區塊——這裡本來拆成兩個 `pgpool:` top-level key，YAML 同一層出現兩次
+#     同名 key 時，Helm 的 parser 會整個丟掉第一個、只留最後一個，等於
+#     image 那段完全沒生效過（部署時就是這樣才卡住的：postgresql.image 有
+#     生效，pgpool.image 完全沒生效，因為它被下面那個 pgpool: 區塊蓋掉了）。
+#
+# ⚠️ customUsersSecret 這件事也是這次踩到、值得記下來的坑：postgresql-ha
+#    這個 chart 的 pgpool 元件只會在 container 啟動時，把
+#    pgpool.postgresUsername（預設 "postgres"）這一個使用者寫進
+#    pool_passwd。用 psql 直接對 postgresql（bypass pgpool）新建的
+#    langfuse role，pgpool 完全不知道，會直接
+#    `SCRAM authentication failed: pool_passwd file does not contain an
+#    entry for "langfuse"`。要讓新使用者能透過 pgpool（也就是 Langfuse 實際
+#    會連的那個 service）登入，一定要透過 pgpool.customUsers /
+#    customUsersSecret 讓 chart 把它寫進 pool_passwd，不能只在資料庫端建好
+#    role 就以為結束了。
+pgpool:
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/pgpool
+    tag: 4.6.3-debian-12-r0
+    digest: "sha256:d3bf3910f148d7546df0762d1abed497cdeab01fdb239a337982e240a2d110ab"
+    pullPolicy: IfNotPresent
+  customUsersSecret: langfuse-postgresql-pgpool-users
