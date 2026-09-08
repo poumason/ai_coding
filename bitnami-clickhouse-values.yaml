@@ -4,43 +4,60 @@
 # 這份是給 Bitnami CH chart 用的 values，不是給 Langfuse chart 用的。
 #
 # 部署命令：
-#   helm install clickhouse oci://registry-1.docker.io/bitnamicharts/clickhouse \
-#     -n data --create-namespace \
+#   helm install langfuse-clickhouse oci://registry-1.docker.io/bitnamicharts/clickhouse \
+#     --version 9.4.4 \
+#     -n dev --create-namespace \
 #     -f bitnami-clickhouse-values.yaml
 #
-# ⚠️ Bitnami 已將多數 chart 轉為 legacy，正式環境建議：
-#   1. Pin chart version（用 --version <x.y.z> 鎖住）
-#   2. Pin image tag（下方 image.tag 已鎖 25.x）
-#   3. 未來考慮遷移到官方 clickhouse-server + StatefulSet
+# 部署後 hostname（release=langfuse-clickhouse, namespace=dev）：
+#   主要連線用（Langfuse 指這個，跨 shard/replica 做 load balance）：
+#     langfuse-clickhouse.dev.svc.cluster.local:8123 (http) / :9000 (tcp)
+#   個別 pod（除錯用，shards=1 只有 shard0）：
+#     langfuse-clickhouse-shard0-0.langfuse-clickhouse-headless.dev.svc.cluster.local
+#     langfuse-clickhouse-shard0-1.langfuse-clickhouse-headless.dev.svc.cluster.local
+#
+# ⚠️ Bitnami 已將多數 chart 轉為付費的 Secure Images，免費 docker.io/bitnami/*
+#    這兩個 repo（clickhouse、clickhouse-keeper）現在是 0 個免費 tag（Docker Hub
+#    API 查 bitnami/clickhouse 的 tags 回傳 count:0），包括這個 chart 文件上寫的
+#    預設版本 25.7.5-debian-12-r0 也一樣抓不到。下面改指到 Bitnami 保留給既有
+#    用戶的免費 legacy mirror `bitnamilegacy/*`，並用 digest 釘住目前解析到的
+#    版本（跟 bitnami-redis-sentinel-values.yaml / bitnami-minio-values.yaml
+#    的處理方式一致）。之後要升級版本要重新用
+#      docker buildx imagetools inspect bitnamilegacy/clickhouse:latest
+#      docker buildx imagetools inspect bitnamilegacy/clickhouse-keeper:latest
+#    解析新的 digest。
 # =============================================================================
 
 ## Bitnami ClickHouse 主要參數
 ## Full chart values ref: https://github.com/bitnami/charts/tree/main/bitnami/clickhouse
 
-# --- Image (pin 版本，Bitnami legacy 不再自動更新) ---
-# ⚠️ 版本已對齊這個 chart 內建方案的建議版本（見 values-embedded-clickhouse.yaml /
-#    values.yaml 的 clickhouse.cluster.image.tag = "26.4"）。
-#    但這個 tag 字串（26.4-debian-12-r0）尚未在本次 session 中即時查證是否為
-#    Bitnami registry 上實際存在的 tag（工具當下連不上網路）。部署前請先執行：
-#      docker manifest inspect bitnami/clickhouse:26.4-debian-12-r0
-#    或直接查 https://hub.docker.com/r/bitnami/clickhouse/tags 確認實際可用版本，
-#    再視需要調整成最接近的既有 tag。
+# --- Image：ClickHouse server 本體 ---
 image:
   registry: docker.io
-  repository: bitnami/clickhouse
-  tag: 26.4-debian-12-r0       # 對齊 langfuse chart 建議的 CH 26.4（請部署前查證 tag 是否存在）
+  repository: bitnamilegacy/clickhouse
+  tag: latest
+  digest: "sha256:aca8db51b177630eb405c6401e5f820e9e71d366d60562974d709bbddea7ad12"
   pullPolicy: IfNotPresent
 
-# --- 叢集架構：1 shard + 2 replica ---
+# --- 叢集架構：1 shard + 2 replica（純 HA 複製，不做 sharding/分區）---
 shards: 1
 replicaCount: 2
 
+# --- Cluster 名稱：chart 明確有這個參數，預設就是 "default" ---
+# 不特別覆寫，保留預設值 "default"。這個字串會寫進 remote_servers.xml，
+# Langfuse 下 ON CLUSTER DDL 時用的名字要對得上——目前查到 Bitnami 端是固定
+# 可控的（不是黑盒子），部署後可以直接連進去用 Langfuse migration 實測是否吃這個名字。
+# clusterName: default
+
 # --- 認證：Langfuse 使用 default 使用者 ---
+# 密碼留空，讓 chart 自動產生並存進 Secret/langfuse-clickhouse（key: password）。
+# 跟 redis/minio 一致：langfuse-external-secrets 這個共用 Secret從來沒有真的建
+# 起來過，之前只是規劃階段的占位設定，這裡改成跟其他元件一樣的做法。
 auth:
   username: default
-  # 從你已建立的 Secret 讀取密碼
-  existingSecret: langfuse-external-secrets
-  existingSecretKey: clickhouse-password
+  password: ""
+  existingSecret: ""
+  existingSecretKey: ""
 
 # --- Persistence ---
 persistence:
@@ -51,35 +68,56 @@ persistence:
     - ReadWriteOnce
 
 # --- Resources ---
+# ⚠️ 這組數字是這個 kind dev 叢集實際部署時調的：node 只有 ~7.9Gi 可分配記憶體，
+#    postgres+redis+minio 起來後已經用掉 80%，原本沿用 langfuse chart 內建方案
+#    的正式環境建議值（2Gi request/4Gi limit，兩個 replica 就要 4Gi request）
+#    直接讓第二個 pod FailedScheduling（Insufficient memory）。這裡先降到
+#    dev 夠用的量，正式環境要調大請自行評估。
 resources:
   requests:
-    cpu: "1"
-    memory: "2Gi"
+    cpu: 250m
+    memory: 512Mi
   limits:
-    memory: "4Gi"
+    memory: 1Gi
 
-# --- 內建 ClickHouse Keeper（取代 ZooKeeper） ---
+# --- 內建 ClickHouse Keeper（取代 ZooKeeper，做 Raft 協調）---
+# Keeper 在這個 chart 裡是獨立的 StatefulSet + 獨立的 image
+# （bitnami/clickhouse-keeper），不是 ClickHouse server 內建的功能，所以要
+# 額外釘 keeper.image，不能只改最上面的 image 就以為兩邊都處理到了。
+#
+# 沒有 zookeeper.* 這個 key：這個 chart版本（9.4.4）只有 keeper.*（部署自己的
+# Keeper，我們要的）跟 externalZookeeper.*（改接外部既有的 ZK/Keeper 叢集，
+# 不需要）。keeper.enabled: true 就是全部要做的事，沒有額外的「關掉 zookeeper」
+# 開關要設。
 keeper:
-  enabled: true                # ⭐ 開啟 Keeper 才是真正的 cluster
-zookeeper:
-  enabled: false               # 用 Keeper 就不用 ZooKeeper
+  enabled: true
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/clickhouse-keeper
+    tag: latest
+    digest: "sha256:5f8279a37297f0319ee78845b49a05eb52ff443dfbef779bce799c5ebce2e01b"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
 
-# --- Service（Langfuse 從 headless service DNS 連進來） ---
+# --- Service（Langfuse 指這個 ClusterIP service，跨 shard/replica 做
+#     load balance；不是指某個特定 pod 的 headless DNS）---
 service:
   type: ClusterIP
   ports:
     http: 8123
     tcp: 9000
 
-# --- 增加 Langfuse 需要的 cluster 設定（macros） ---
-# Bitnami chart 預設會產生一個 cluster name = "default"，Langfuse chart 也預設用
-# CLICKHOUSE_CLUSTER_NAME=default，所以不用改；若要客製，在 defaultUser / macros
-# 這邊調整。
-
-# --- 副本間反親和性（避免同 node） ---
-# 用 hard：soft 只是「盡量」分散，node 數不夠或排程器忙時兩個 replica 仍可能被
-# 排到同一台 node，一旦該 node 掛掉就等於整個 HA 失效。要的是保證分散，所以用 hard。
-podAntiAffinityPreset: hard
+# --- 副本間反親和性 ---
+# ⚠️ 這是單 node 的 kind dev 叢集：shards=1 × replicaCount=2 = 2 個 pod，
+#    設 hard 會讓第 2 個 pod 永遠 Pending（跟 redis 那次一樣的情況）。
+#    先用 soft，之後接到真正多 node 的叢集，記得改成 hard 才能保證分散在
+#    不同 node、單一 node 掛掉不會整個 HA 失效。
+podAntiAffinityPreset: soft
 
 # --- Metrics 開啟（可選） ---
 metrics:

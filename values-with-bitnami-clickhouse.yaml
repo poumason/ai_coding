@@ -3,27 +3,20 @@
 #   ClickHouse 用 Bitnami chart 獨立部署（純 StatefulSet + Keeper，不需要 CRD）
 #   Langfuse chart 以 clickhouse.deploy=false 指向 Bitnami CH
 #
-# 其他 store 一樣外接：
-#   - PostgreSQL:  Bitnami postgresql-ha (pgpool)
-#   - Redis:       Bitnami redis (sentinel mode)
-#   - S3:          MinIO
+# 全部四個外接 store 都已經實際部署在 dev namespace 並驗證過（不是規劃階段的
+# 占位設定），細節見各自的 bitnami-*-values.yaml 開頭註解：
+#   - PostgreSQL:  release postgresql-ha（非本輪部署，沿用既有的）
+#   - Redis:       release langfuse-redis（bitnami-redis-sentinel-values.yaml）
+#   - MinIO:       release langfuse-minio（bitnami-minio-values.yaml）
+#   - ClickHouse:  release langfuse-clickhouse（bitnami-clickhouse-values.yaml）
 #
-# 前置條件：
-#   1. 建立密碼 Secret：
-#        kubectl create secret generic langfuse-external-secrets -n <namespace> \
-#          --from-literal=postgres-password='...' \
-#          --from-literal=redis-password='...' \
-#          --from-literal=sentinel-password='...' \
-#          --from-literal=clickhouse-password='...' \
-#          --from-literal=minio-access-key='...' \
-#          --from-literal=minio-secret-key='...'
+# 密碼一律讓各自的 chart 自動產生、存進各自的 Secret（見下面每個 section 的
+# existingSecret/existingSecretKey）。最早規劃階段設想的共用 Secret
+# langfuse-external-secrets 從來沒有真的建立過，已經不是實際採用的做法。
 #
-#   2. 部署 Bitnami ClickHouse（參考 bitnami-clickhouse-values.yaml）：
-#        helm install clickhouse oci://registry-1.docker.io/bitnamicharts/clickhouse \
-#          -n data -f bitnami-clickhouse-values.yaml
-#      ⚠️ Bitnami 已將多數 chart 轉為 legacy，image 請 pin tag，未來自行維護升級。
-#
-#   3. helm install langfuse . -n <namespace> -f values-with-bitnami-clickhouse.yaml
+# 安裝順序：
+#   1. 部署 Redis/MinIO/ClickHouse（各自 bitnami-*-values.yaml 開頭有完整指令）
+#   2. helm install langfuse . -n dev -f values-with-bitnami-clickhouse.yaml
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -135,33 +128,36 @@ redis:
 # -----------------------------------------------------------------------------
 # 3. ClickHouse — 外接 Bitnami ClickHouse
 #
-#   Bitnami chart 產生的 Service 名稱：
-#     <release>-clickhouse.<namespace>.svc.cluster.local           (headless)
-#     <release>-clickhouse-shard0-0.<release>-clickhouse-headless (pod DNS)
+#   實際部署狀態（見 bitnami-clickhouse-values.yaml）：
+#     helm install langfuse-clickhouse oci://registry-1.docker.io/bitnamicharts/clickhouse \
+#       --version 9.4.4 -n dev -f bitnami-clickhouse-values.yaml
+#     → release=langfuse-clickhouse, namespace=dev, shards=1 replicaCount=2 + 3 keeper
 #
-#   若你用 shard=1、replicaCount=2，Langfuse 直接指到 headless 即可。
-# -----------------------------------------------------------------------------
+#   帳密：chart 自動產生，存在 Secret/langfuse-clickhouse 的 admin-password
+#   這個 key（不是 password，這裡容易猜錯——上次的草稿就猜錯過一次，這次是
+#   直接從 dry-run 的 NOTES.txt 對出來的）。
+#
+#   ⭐ cluster.enabled=true 這件事已經在真實叢集上實測驗證過，不是用猜的：
+#     - system.clusters 查得到 cluster 名稱確實是 "default"（Bitnami chart
+#       的 clusterName 參數預設值）
+#     - 用 ReplicatedMergeTree ON CLUSTER default 建表、從 shard0-0 寫入、
+#       從 shard0-1 讀到；反過來從 shard0-1 寫、shard0-0 讀，兩個方向都通
+#     這證實了之前review時擔心的風險：不是「兩份獨立 schema、沒有真正複製資料」，
+#     是真的在做資料複製。
 clickhouse:
   deploy: false
-  # crdCheck 不用特別設：這個檢查只在 clickhouse.deploy=true 時才會跑
-  # （見 templates/validations.yaml），deploy=false 這裡已經自動跳過。
-
-  # release name = clickhouse、namespace = data 時的 headless service DNS
-  host: clickhouse.data.svc.cluster.local
+  host: langfuse-clickhouse.dev.svc.cluster.local
   httpPort: 8123
   nativePort: 9000
   database: default
 
-  # ⭐ 若 Bitnami CH 部署為多副本 + Keeper（真正的 cluster），這裡開 true。
-  #    如果只是單機（Bitnami 的 shards=1 & replicaCount=1），這裡必須 false，
-  #    否則 Langfuse 會下 ON CLUSTER DDL 而失敗。
   cluster:
     enabled: true
 
   auth:
     username: default
-    existingSecret: langfuse-external-secrets
-    existingSecretKey: clickhouse-password
+    existingSecret: langfuse-clickhouse
+    existingSecretKey: admin-password
 
   migration:
     autoMigrate: true
