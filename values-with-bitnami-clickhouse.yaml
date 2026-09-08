@@ -23,6 +23,28 @@
 # Langfuse 核心
 # -----------------------------------------------------------------------------
 langfuse:
+  # ⚠️ 版本降到 v3.225.7（不是 chart appVersion 預設的 4.24.0）。
+  #
+  #    v4.24.0 的 ClickHouse migration #39 起（events_full/events_core，全文
+  #    檢索用的 events 表重構）用了 INDEX ... TYPE text(tokenizer = xxx) 這種
+  #    具名參數語法，這是 v4.0.0 才新增的功能（官方 release note 直接寫明：
+  #    full-text search / filter search bar / monitors&alerts / Observations
+  #    API v2 都是這個 ClickHouse schema 重構帶出來的）。實測這個語法連
+  #    Bitnami legacy mirror 能拿到的最新版 ClickHouse（25.7.5，該 mirror的
+  #    版本天花板）都不認得，會直接 INCORRECT_QUERY 炸掉，整個 migration
+  #    卡死在 #39，langfuse-web CrashLoopBackOff 永遠好不了。
+  #
+  #    v3.225.7 是目前 Langfuse 仍在並行維護的最新 v3 版本（不是舊分支棄用
+  #    版），ClickHouse migration 只到 #37，完全不碰全文檢索語法，跟這裡的
+  #    Bitnami ClickHouse（25.7.5）相容。代價：拿不到上面那些 v4 限定功能。
+  #    這是使用者確認過、能接受的取捨，不是我自己選的。
+  #
+  #    要升回 v4，前提是 ClickHouse 版本能到官方建議的 26.4（Bitnami 目前
+  #    付費/免費都拿不到），例如换成官方 clickhouse/clickhouse-server image
+  #    或改用 Altinity Operator（CRD）部署。
+  image:
+    tag: "3.225.7"
+
   logging:
     level: info
     format: json
@@ -42,7 +64,37 @@ langfuse:
     signUpDisabled: false
 
   nodeEnv: production
-  replicas: 2
+  # replicas: 2  # dev 單 node 叢集記憶體有限，改用下面 web/worker 各自的 1 replica
+
+  # ⚠️ 實測踩到的坑：Prisma migration engine 透過 pgpool（connection pooling +
+  #    load balancing）跑 schema migration 會直接失敗：
+  #      "Invariant violation: migration persistence is not initialized"
+  #    這就是最上面 postgresql.directUrl 註解警告過的情境，真的發生了。
+  #    改用 additionalEnv + secretKeyRef 指向一個獨立建立的 Secret
+  #    （langfuse-postgresql-direct-url，key: url）。
+  #
+  #    ⚠️ 第二個坑：Secret 裡的連線字串不能只是「隨便一個 bypass pgpool 的
+  #    postgres 連線」，一定要精準指到「目前的 primary」那個 pod，不能用
+  #    postgresql-ha-postgresql 這個泛用 Service——那個 Service 會在
+  #    postgresql-ha-postgresql-0/1/2 三個 pod（1 primary + 2 read-only
+  #    replica）之間 load balance，隨機連到 replica 就會在 DROP/CREATE 之類
+  #    的 DDL 直接報「cannot execute ... in a read-only transaction」。
+  #    實測用 `SELECT pg_is_in_recovery()` 逐一確認過，這次是
+  #    postgresql-ha-postgresql-1 是 primary（false = 不是 recovery/replica，
+  #    是 primary），Secret 裡的 url 精準指到
+  #    postgresql-ha-postgresql-1.postgresql-ha-postgresql-headless。
+  #
+  #    ⚠️ 這是目前這個 repmgr HA 設定下已知的脆弱點：一旦 repmgr failover、
+  #    primary 換成別的 pod，這個寫死的 pod 名字就會失效，DIRECT_URL 又會
+  #    開始打到 replica。正式環境要嘛換一個會自動追隨 primary 的機制（例如
+  #    另外接一個只代理 primary 的 service/proxy），要嘛在 failover 後手動
+  #    更新這個 Secret。dev 環境先這樣接受，有記錄下來就不算隱藏坑。
+  additionalEnv:
+    - name: DIRECT_URL
+      valueFrom:
+        secretKeyRef:
+          name: langfuse-postgresql-direct-url
+          key: url
 
   ingress:
     enabled: true
@@ -58,17 +110,27 @@ langfuse:
       enabled: true
       secretName: langfuse-tls
 
+  # ⚠️ web/worker 的 replicas 跟 resources 都是這次為了這個單 node kind dev
+  #    叢集調小的（原本 2 replicas × 1Gi request 各別是給正式環境用的建議值，
+  #    web+worker 4 個 pod 就要 4Gi request，這個 node 扣掉 postgres/redis/
+  #    clickhouse/minio 之後剩不到 2.6Gi，會跟 clickhouse 那次一樣
+  #    FailedScheduling）。正式多 node 環境請調回 2+ replicas。
+  # ⚠️ web 實測撞過一次 OOM：migration 全部成功、Next.js 也真的啟動了
+  # （"Ready in 0ms"），啟動後續的初始化流程才把 512Mi/1Gi 這組 dev 用的
+  # 記憶體吃滿，直接 "FATAL ERROR: Reached heap limit ... JavaScript heap
+  # out of memory"（exit code 134）。不是 migration/相容性問題，單純是
+  # Next.js server 需要的記憶體比我原本估的多，調大即可。
   web:
-    replicas: 2
+    replicas: 1
     resources:
-      requests: { cpu: 500m, memory: 1Gi }
+      requests: { cpu: 250m, memory: 768Mi }
       limits:   { memory: 2Gi }
 
   worker:
-    replicas: 2
+    replicas: 1
     resources:
-      requests: { cpu: 500m, memory: 1Gi }
-      limits:   { memory: 2Gi }
+      requests: { cpu: 250m, memory: 512Mi }
+      limits:   { memory: 1Gi }
 
 # -----------------------------------------------------------------------------
 # 1. PostgreSQL HA
@@ -96,10 +158,11 @@ postgresql:
   host: postgresql-ha-pgpool.dev.svc.cluster.local
   port: 5432
 
-  # pgpool 的 prepared statement 快取偶爾會卡住 Prisma migration。若 migration
-  # 卡住或報 "prepared statement already exists" 之類的錯誤，把 directUrl 指到
-  # primary Service（bypass pgpool）即可：
-  # directUrl: "postgresql://langfuse:<pw>@postgresql-ha-postgresql.dev.svc.cluster.local:5432/langfuse"
+  # pgpool 的 connection pooling 真的會卡住 Prisma migration engine（實測
+  # 遇到，不是理論風險），已經用 langfuse.additionalEnv 的 DIRECT_URL 處理，
+  # 見上面該區塊的完整說明（含「一定要指到目前的 primary pod，不能用泛用
+  # Service」這個第二個坑）。這裡故意留空，不要跟 additionalEnv 的 DIRECT_URL
+  # 衝突。
   directUrl: ""
 
   auth:

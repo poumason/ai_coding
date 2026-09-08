@@ -18,14 +18,26 @@
 #
 # ⚠️ Bitnami 已將多數 chart 轉為付費的 Secure Images，免費 docker.io/bitnami/*
 #    這兩個 repo（clickhouse、clickhouse-keeper）現在是 0 個免費 tag（Docker Hub
-#    API 查 bitnami/clickhouse 的 tags 回傳 count:0），包括這個 chart 文件上寫的
-#    預設版本 25.7.5-debian-12-r0 也一樣抓不到。下面改指到 Bitnami 保留給既有
-#    用戶的免費 legacy mirror `bitnamilegacy/*`，並用 digest 釘住目前解析到的
-#    版本（跟 bitnami-redis-sentinel-values.yaml / bitnami-minio-values.yaml
-#    的處理方式一致）。之後要升級版本要重新用
-#      docker buildx imagetools inspect bitnamilegacy/clickhouse:latest
-#      docker buildx imagetools inspect bitnamilegacy/clickhouse-keeper:latest
-#    解析新的 digest。
+#    API 查 bitnami/clickhouse 的 tags 回傳 count:0）。改指到 Bitnami 保留給既有
+#    用戶的免費 legacy mirror `bitnamilegacy/*`。
+#
+# ⚠️ 版本這裡踩到一個真的會讓 migration 失敗的坑，記錄一下：一開始貪方便用
+#    tag: latest，結果 bitnamilegacy 的 latest 解析出來是 25.5.2.47——這個版本
+#    的 ClickHouse 跑 Langfuse migration #39（建立 events_full 表，對
+#    lower(input) 這種運算式建全文索引 INDEX ... TYPE text(...)）會直接噴
+#      Code: 80. DB::Exception: Only literals can be skip index arguments.
+#    因為 25.5.x 的全文索引語法還不支援對「運算式」建索引，只吃純欄位/常數。
+#    改成明確 pin 這個 chart 文件本來就建議的 25.7.5-debian-12-r0（bitnamilegacy
+#    上其實有完整的版本化 tag 可以選，不是只有 latest），實測 migration #39
+#    就能正常跑過去了。
+#
+#    教訓：Bitnami legacy mirror 的 latest tag 不等於「最新穩定版」，可能落後
+#    chart 文件寫的建議版本好幾個 minor version，遇到這種語法相容性問題時，
+#    第一件事應該是查 bitnamilegacy 有沒有具體版本 tag 可以 pin，而不是猜測
+#    降版本或加參數繞過。之後要升級版本，用
+#      docker buildx imagetools inspect bitnamilegacy/clickhouse:<具體版本tag>
+#      docker buildx imagetools inspect bitnamilegacy/clickhouse-keeper:<具體版本tag>
+#    解析新的 digest，優先選跟這個 chart 文件建議版本一致或更新的具體 tag。
 # =============================================================================
 
 ## Bitnami ClickHouse 主要參數
@@ -35,8 +47,8 @@
 image:
   registry: docker.io
   repository: bitnamilegacy/clickhouse
-  tag: latest
-  digest: "sha256:aca8db51b177630eb405c6401e5f820e9e71d366d60562974d709bbddea7ad12"
+  tag: 25.7.5-debian-12-r0
+  digest: "sha256:2261b50861e29ad3a15d427db96ebf23aabb3be5b12b870192862777246cb349"
   pullPolicy: IfNotPresent
 
 # --- 叢集架構：1 shard + 2 replica（純 HA 複製，不做 sharding/分區）---
@@ -94,8 +106,8 @@ keeper:
   image:
     registry: docker.io
     repository: bitnamilegacy/clickhouse-keeper
-    tag: latest
-    digest: "sha256:5f8279a37297f0319ee78845b49a05eb52ff443dfbef779bce799c5ebce2e01b"
+    tag: 25.7.5-debian-12-r0
+    digest: "sha256:d56ed003749704c62766b29c96437f72d2f3b9cf9a2e09069ebad99119d091be"
     pullPolicy: IfNotPresent
   resources:
     requests:
