@@ -169,27 +169,36 @@ clickhouse:
 
 # -----------------------------------------------------------------------------
 # 4. MinIO（S3 相容）
-#    ⚠️ 必須 forcePathStyle: true；下面三個 bucket（langfuse-events / -exports /
-#       -media）chart 不會替外部 S3 建立，要先手動在 MinIO 建好，否則上傳會直接
-#       噴 NoSuchBucket。
+#
+#   實際部署狀態（見 bitnami-minio-values.yaml）：
+#     helm install langfuse-minio oci://registry-1.docker.io/bitnamicharts/minio \
+#       -n dev -f bitnami-minio-values.yaml
+#     → release=langfuse-minio, namespace=dev, mode=standalone
+#
+#   帳密：chart 自動產生，存在 Secret/langfuse-minio 的 root-user / root-password
+#   這兩個 key。standalone 模式沒有另外開 dedicated IAM user，root 帳密本身
+#   就是 Langfuse 要用的 access key / secret key。
+#
+#   三個 bucket（langfuse-events / -exports / -media）已經用 chart 的
+#   defaultBuckets 在啟動時自動建好，不用再手動建。
 # -----------------------------------------------------------------------------
 s3:
   deploy: false
   storageProvider: s3
 
-  endpoint: "http://minio.data.svc.cluster.local:9000"
+  endpoint: "http://langfuse-minio.dev.svc.cluster.local:9000"
   region: "us-east-1"
   forcePathStyle: true
   bucket: langfuse
 
   accessKeyId:
     secretKeyRef:
-      name: langfuse-external-secrets
-      key: minio-access-key
+      name: langfuse-minio
+      key: root-user
   secretAccessKey:
     secretKeyRef:
-      name: langfuse-external-secrets
-      key: minio-secret-key
+      name: langfuse-minio
+      key: root-password
 
   eventUpload:
     bucket: langfuse-events

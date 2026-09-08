@@ -1,0 +1,87 @@
+# =============================================================================
+# Bitnami minio chart values — S3 相容物件儲存給 Langfuse 用
+#（搭配這個 langfuse chart 的 s3.* 外接設定使用）
+#
+# 這份是給 Bitnami `minio` chart 用的 values，不是給 Langfuse chart 用的。
+#
+# 拓樸：mode=standalone（單 pod，非 distributed erasure-coding 模式）。
+#   MinIO distributed 模式至少要 4 個 node 才有實際容錯意義（少於 4 個等於
+#   沒有 erasure coding 的好處，只是徒增資源消耗），而這個 dev 叢集
+#   （kind，1 個 node）本來就沒有多 node 可以分散，所以用 standalone。
+#   之後要上正式環境、且有 >=4 個實體 node 時，再切到 mode: distributed。
+#
+# 部署命令：
+#   helm install langfuse-minio oci://registry-1.docker.io/bitnamicharts/minio \
+#     -n dev --create-namespace \
+#     --version 17.0.21 \
+#     -f bitnami-minio-values.yaml
+#
+# 部署後 endpoint（release=langfuse-minio, namespace=dev）：
+#   http://langfuse-minio.dev.svc.cluster.local:9000
+#
+# 帳密：auth.rootPassword 留空 → chart 自動產生，存進 Secret/langfuse-minio
+#   （key: root-user / root-password）。Langfuse 的 s3.accessKeyId /
+#   secretAccessKey 直接對應這組 root 帳密（standalone 模式沒有另外開
+#   dedicated IAM user，root 帳密本身就是唯一的 S3 access key/secret）。
+# =============================================================================
+
+mode: standalone
+
+# ⚠️ 這個 chart 預設指到的 docker.io/bitnami/minio 這個 repo 目前是「0 個免費
+#    tag」（連 latest 都沒有，Docker Hub API 查 `bitnami/minio` tags 回傳
+#    count:0）——跟 redis/clickhouse 那兩個「至少還有 latest」的情況不一樣，
+#    MinIO 已經完全被收進 Bitnami Secure Images 付費牆後面了。
+#    免費可用的替代來源是 `bitnamilegacy/minio`（Bitnami 官方保留給既有用戶
+#    的舊版免費 mirror），這裡改指過去，並用 digest 釘住目前解析到的版本。
+#    這兩個 digest 是本次部署時用
+#      docker buildx imagetools inspect bitnamilegacy/minio:latest
+#      docker buildx imagetools inspect bitnamilegacy/minio-object-browser:latest
+#    解出來的，之後要升級版本要重新解析（bitnamilegacy 之後會不會繼續維護、
+#    要不要乾脆改用非 Bitnami 的 MinIO 官方 chart，建議另外評估）。
+image:
+  registry: docker.io
+  repository: bitnamilegacy/minio
+  tag: latest
+  digest: "sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c"
+  pullPolicy: IfNotPresent
+
+auth:
+  rootUser: langfuse-admin
+  rootPassword: ""    # 留空 = chart 自動產生，存進 Secret/langfuse-minio
+
+# 啟動時自動建立 Langfuse 需要的 3 個 bucket（validations.yaml 要求外部 S3
+# 一定要先手動/自動建好，不然上傳會直接噴 NoSuchBucket）。
+defaultBuckets: "langfuse-events langfuse-exports langfuse-media"
+
+persistence:
+  enabled: true
+  size: 8Gi
+  storageClass: ""     # 空 = 用叢集預設 StorageClass
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+service:
+  type: ClusterIP
+  ports:
+    api: 9000
+
+# Console（Web UI）保留預設開啟，方便用 port-forward 進去看 bucket，
+# 但不開 ingress、不對外曝露。
+console:
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/minio-object-browser
+    tag: latest
+    digest: "sha256:4a450de20eef96df6d72fd638e737a271895142c4c456610f4d106dec42e0c2c"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
