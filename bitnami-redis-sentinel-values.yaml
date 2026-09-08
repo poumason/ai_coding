@@ -1,0 +1,105 @@
+# =============================================================================
+# Bitnami redis chart values — Redis + Sentinel HA for Langfuse
+# （搭配這個 langfuse chart 的 redis.sentinel.* 外接設定使用）
+#
+# 這份是給 Bitnami `redis` chart 用的 values，不是給 Langfuse chart 用的。
+# 拓樸：architecture=replication + sentinel.enabled=true
+#   → 1 個 StatefulSet「<release>-node」共 3 個 pod，每個 pod 同時跑
+#     redis + redis-sentinel 兩個 container，由 Sentinel 動態選出 master，
+#     不是固定哪個 pod 是 master。
+#
+# 部署命令（release name 決定 hostname，改了要同步改 langfuse chart 那邊的
+# redis.sentinel.nodes）：
+#   helm install langfuse-redis oci://registry-1.docker.io/bitnamicharts/redis \
+#     -n dev --create-namespace \
+#     --version 28.0.15 \
+#     -f bitnami-redis-sentinel-values.yaml
+#
+# 部署後 hostname（release=langfuse-redis, namespace=dev）：
+#   langfuse-redis-node-0.langfuse-redis-headless.dev.svc.cluster.local:26379
+#   langfuse-redis-node-1.langfuse-redis-headless.dev.svc.cluster.local:26379
+#   langfuse-redis-node-2.langfuse-redis-headless.dev.svc.cluster.local:26379
+#
+# 密碼：auth.password 留空 → chart 自動產生，存進 Secret/langfuse-redis
+#   （key: redis-password）。Sentinel 也是用同一組密碼（auth.sentinel: true），
+#   這個 chart 版本沒有獨立的 sentinel 專用密碼欄位。
+#
+# ⚠️ Bitnami 已轉 legacy：這個 chart 的 image.tag 預設是 "latest"（沒有可 pin
+#    的歷史版本 tag 可選，除非有 Bitnami Secure Images 訂閱），所以改用
+#    image.digest / sentinel.image.digest 釘住目前解析到的 immutable digest，
+#    至少確保「這次裝的版本」不會因為 latest 漂移而在你沒發現的情況下改變。
+#    這兩個 digest 是本次準備時用
+#      docker buildx imagetools inspect bitnami/redis:latest
+#      docker buildx imagetools inspect bitnami/redis-sentinel:latest
+#    解出來的，之後要升級版本要重新解析。
+# =============================================================================
+
+architecture: replication
+
+image:
+  registry: docker.io
+  repository: bitnami/redis
+  tag: latest
+  digest: "sha256:ffa455a3ad00bccc24dfde113ef55329dde687da242e9feb6ccd2b30eb93e8f3"
+  pullPolicy: IfNotPresent
+
+# --- 認證 ---
+auth:
+  enabled: true
+  sentinel: true          # Sentinel port (26379) 也要求認證，用同一組密碼
+  password: ""            # 留空 = chart 自動產生，存進 Secret/<release> (key: redis-password)
+
+# --- Sentinel ---
+sentinel:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: bitnami/redis-sentinel
+    tag: latest
+    digest: "sha256:97433fd14ea945c164ac514c162e2d2a017e9044fdc7ec46abf12a92f4660770"
+    pullPolicy: IfNotPresent
+  masterSet: mymaster     # 對應 langfuse chart 的 redis.sentinel.masterName
+  quorum: 2                # 3 節點，容忍 1 個掛掉還能選出新 master
+  downAfterMilliseconds: 60000
+  failoverTimeout: 180000
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+# --- Redis 節點（sentinel.enabled=true 時，實際運作的是這裡的 replica.* 設定，
+#     master.* 會被忽略 —— 因為所有節點都在同一個 StatefulSet 裡，master 角色
+#     是動態選出來的，不是固定的某個 replica 编号） ---
+replica:
+  replicaCount: 3
+
+  # Langfuse 要求 noeviction，Bitnami 預設是 allkeys-lru：job queue 資料被
+  # eviction 掉的話 worker 的 job 會直接消失。
+  configuration: |-
+    maxmemory-policy noeviction
+
+  persistence:
+    enabled: true
+    size: 8Gi
+    storageClass: ""       # 空 = 用叢集預設 StorageClass
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+  # ⚠️ 這是單 node 的 kind dev 叢集：設 hard 會讓第 2、3 個 pod 永遠 Pending
+  #    （3 個 replica 搶同一個 node，hard anti-affinity 不允許同 node 共存）。
+  #    正式多 node 環境要記得改成 hard，才能保證真的分散在不同 node 上。
+  podAntiAffinityPreset: soft
+
+# --- 停用不需要的功能，降低 dev 環境資源用量 ---
+metrics:
+  enabled: false
+
+networkPolicy:
+  enabled: false

@@ -103,17 +103,26 @@ postgresql:
 # -----------------------------------------------------------------------------
 # 2. Redis Sentinel
 # -----------------------------------------------------------------------------
+# 實際部署狀態（見 bitnami-redis-sentinel-values.yaml）：
+#   helm install langfuse-redis oci://registry-1.docker.io/bitnamicharts/redis \
+#     -n dev -f bitnami-redis-sentinel-values.yaml
+#   → release=langfuse-redis, namespace=dev, 3 個 node（架構=replication+sentinel）
+#
+#   密碼：Bitnami chart 自動產生，存在 Secret/langfuse-redis 的 redis-password
+#   這個 key。這個 chart 版本沒有獨立的 sentinel 密碼，auth.sentinel: true 只是
+#   讓 Sentinel port(26379) 也套用同一組密碼，所以下面 sentinel.existingSecret
+#   跟 auth.existingSecret 指向同一個 Secret/同一個 key。
 redis:
   deploy: false
   sentinel:
     enabled: true
     masterName: mymaster
-    nodes: "langfuse-redis-node-0.langfuse-redis-headless.data.svc.cluster.local:26379,langfuse-redis-node-1.langfuse-redis-headless.data.svc.cluster.local:26379,langfuse-redis-node-2.langfuse-redis-headless.data.svc.cluster.local:26379"
-    existingSecret: langfuse-external-secrets
-    existingSecretPasswordKey: sentinel-password
+    nodes: "langfuse-redis-node-0.langfuse-redis-headless.dev.svc.cluster.local:26379,langfuse-redis-node-1.langfuse-redis-headless.dev.svc.cluster.local:26379,langfuse-redis-node-2.langfuse-redis-headless.dev.svc.cluster.local:26379"
+    existingSecret: langfuse-redis
+    existingSecretPasswordKey: redis-password
   auth:
     username: default
-    existingSecret: langfuse-external-secrets
+    existingSecret: langfuse-redis
     existingSecretPasswordKey: redis-password
     database: 0
 
