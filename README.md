@@ -22,7 +22,14 @@ A complete CrewAI demonstration featuring a coffee shop use case with:
 
 A sample agent implementation using LangGraph with Agent-to-Agent (A2A) protocol support.
 
-### 4. Main Entry Point (`main.py`)
+### 4. AG-UI Protocol Demo (`ag_ui_demo/`)
+
+A FastAPI + Claude Agent SDK backend that speaks the [AG-UI protocol](https://ag-ui.com)
+over SSE, with a small vanilla-JS frontend to watch streaming text, tool
+calls, human-in-the-loop confirmation, and shared state sync as raw protocol
+events.
+
+### 5. Main Entry Point (`main.py`)
 
 Simple CLI entry point for the project.
 
@@ -53,6 +60,7 @@ python main.py
 
 - `claude-agent-sdk>=0.1.53`
 - `claude-code-sdk>=0.0.25`
+- `fastapi`, `uvicorn`, `ag-ui-protocol` (for `ag_ui_demo/`)
 
 ## License
 
