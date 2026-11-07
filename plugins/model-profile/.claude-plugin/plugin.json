@@ -1,0 +1,9 @@
+{
+  "name": "model-profile",
+  "version": "0.1.0",
+  "description": "Switch between cloud and internal Claude model profiles with /profile",
+  "author": {
+    "name": "poulin"
+  },
+  "keywords": ["settings", "model", "profile", "env"]
+}
