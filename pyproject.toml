@@ -1,0 +1,13 @@
+[project]
+name = "ai-coding"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "ag-ui-protocol>=0.1.22",
+    "claude-agent-sdk>=0.2.154",
+    "claude-code-sdk>=0.0.25",
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.42.0",
+]
